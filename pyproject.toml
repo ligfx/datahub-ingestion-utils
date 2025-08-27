@@ -1,0 +1,18 @@
+[project]
+name = "ligfx-datahub-ingestion-utils"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "acryl-datahub",
+]
+
+[[project.authors]]
+name = "Michael Maltese"
+email = "michael.maltese@datahub.com"
+
+[project.entry-points."datahub.ingestion.transformer.plugins"]
+rename_urn = "datahub_rename_urn_transformer:RenameUrn"
+
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
