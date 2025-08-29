@@ -1,4 +1,5 @@
-from typing import Iterable
+import re
+from typing import Dict, Iterable, List
 
 import pydantic
 
@@ -16,19 +17,52 @@ from datahub.ingestion.api.common import (
 from datahub.ingestion.api.transform import Transformer
 
 URN_VALIDATION_MESSAGE_TEMPLATE = """
-new_urn must be a URN that starts with `urn:li:`, got %r. (Typical dataset URNs look like `urn:li:dataset:(urn:li:dataPlatform:s3,bucket/mytable,PROD)` or `urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.public.order_details,PROD)`. If you're trying to understand how to build a particular type of URN, you can pull up an existing entity in the DataHub web UI and see the URN in the URL bar.)
+URN must start with `urn:li:`, got %r. (Typical dataset URNs look like `urn:li:dataset:(urn:li:dataPlatform:s3,bucket/mytable,PROD)` or `urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.public.order_details,PROD)`. If you're trying to understand how to build a particular type of URN, you can pull up an existing entity in the DataHub web UI and see the URN in the URL bar.)
 """.strip()
 
 
-# class RenameUrnConfig(TransformerSemanticsConfigModel):
-class RenameUrnConfig(ConfigModel):
+def _extract_regex(regex, value):
+    m = re.match(regex, value)
+    if not m:
+        raise ValueError(f"Couldn't match {repr(regex)} against {repr(value)}")
+    return m.group(0)
+
+
+class RenameSpec(ConfigModel):
+    old_urn: str
     new_urn: str
+
+    @pydantic.root_validator(skip_on_failure=True)
+    def validate_no_double_stars(cls, values: Dict) -> Dict:
+        old_urn = values["old_urn"]
+        new_urn = values["new_urn"]
+
+        old_urn_prefix = _extract_regex(r"urn:li:[^:(]+", old_urn)
+        new_urn_prefix = _extract_regex(r"urn:li:[^:(]+", new_urn)
+
+        if old_urn_prefix != new_urn_prefix:
+            raise ValueError(
+                f"old_urn and new_urn must share the same type, got old_urn_type = {repr(old_urn_prefix)} and new_urn_type = {repr(new_urn_prefix)}"
+            )
+
+        return values
+
+    @pydantic.validator("old_urn", always=True)
+    def check_old_urn(cls, old_urn: str) -> str:
+        if not old_urn.startswith("urn:li:"):
+            raise ValueError(URN_VALIDATION_MESSAGE_TEMPLATE % old_urn)
+        return old_urn
 
     @pydantic.validator("new_urn", always=True)
     def check_new_urn(cls, new_urn: str) -> str:
         if not new_urn.startswith("urn:li:"):
             raise ValueError(URN_VALIDATION_MESSAGE_TEMPLATE % new_urn)
         return new_urn
+
+
+# class RenameUrnConfig(TransformerSemanticsConfigModel):
+class RenameUrnConfig(ConfigModel):
+    rename_specs: List[RenameSpec]
 
 
 class RenameUrn(Transformer):
@@ -50,14 +84,20 @@ class RenameUrn(Transformer):
                 envelope.record,
                 (MetadataChangeProposalClass, MetadataChangeProposalWrapper),
             ):
-                # not strictly necessary, but makes ingestion logs make more sense
-                if "workunit_id" in envelope.metadata:
-                    envelope.metadata["workunit_id"] = envelope.metadata[
-                        "workunit_id"
-                    ].replace(envelope.record.entityUrn, self.config.new_urn)
+                for spec in self.config.rename_specs:
+                    if envelope.record.entityUrn != spec.old_urn:
+                        continue
 
-                # change the URN!
-                envelope.record.entityUrn = self.config.new_urn
+                    # not strictly necessary, but makes ingestion logs make more sense
+                    if "workunit_id" in envelope.metadata:
+                        envelope.metadata["workunit_id"] = envelope.metadata[
+                            "workunit_id"
+                        ].replace(envelope.record.entityUrn, spec.new_urn)
+
+                    # change the URN!
+                    envelope.record.entityUrn = spec.new_urn
+
+                    break
             elif isinstance(envelope.record, (ControlRecord, EndOfStream)):
                 continue
             else:
